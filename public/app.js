@@ -3,8 +3,10 @@
 /* ---------------------------------------------------------------- helpers */
 const $ = (s) => document.querySelector(s);
 const ICON_DIR = '/assets/icons/';   // primary-stat icons   (see README for file names)
-const ITEM_DIR = '/assets/items/';   // item/block icons     <id>.png  e.g. diamond_pickaxe.png
-const MOB_DIR = '/assets/mobs/';     // mob icons            <id>.png  e.g. zombie.png
+// Item and mob icons come from the backend (/api/icon/...), which uses a local file in
+// public/assets/items|mobs/<id>.png if present, otherwise fetches + caches it from the asset repo.
+const ITEM_DIR = '/api/icon/item/';
+const MOB_DIR = '/api/icon/mob/';
 
 async function api(url, opts) {
   const r = await fetch(url, opts);
@@ -62,6 +64,50 @@ function skin(type, uuid, name, cls, size) {
 function iconImg(src, cls, glyph, fallbackCls = 'ph') {
   const img = el('img', { class: cls, src, alt: '', loading: 'lazy' });
   img.addEventListener('error', () => img.replaceWith(el('div', { class: fallbackCls, text: glyph })));
+  return img;
+}
+
+// Textures that are grayscale in the game files and get colored by the biome at runtime.
+function tintFor(id) {
+  if (/_leaves$/.test(id)) {
+    if (/^(azalea|flowering_azalea|cherry|pale_oak)_/.test(id)) return null;
+    if (id.startsWith('spruce')) return '#619961';
+    if (id.startsWith('birch')) return '#80a755';
+    return '#48b518';
+  }
+  if (['grass_block', 'short_grass', 'tall_grass', 'grass', 'fern', 'large_fern'].includes(id)) return '#79c05a';
+  if (id === 'vine') return '#48b518';
+  return null;
+}
+
+// Icon for the Top-50 lists: <img>, multiplied with a biome tint when needed,
+// or a letter placeholder when no icon could be found.
+function itemIcon(dir, id) {
+  const src = dir + id;
+  const ph = () => el('div', { class: 'ph small', text: id.charAt(0).toUpperCase() });
+  const tint = dir === ITEM_DIR ? tintFor(id) : null;
+  const img = new Image();
+  img.loading = 'lazy';
+  img.alt = '';
+  img.addEventListener('error', () => img.replaceWith(ph()));
+  if (tint) {
+    img.addEventListener('load', () => {
+      try {
+        const c = document.createElement('canvas');
+        c.width = img.naturalWidth; c.height = img.naturalHeight;
+        const x = c.getContext('2d');
+        x.drawImage(img, 0, 0);
+        x.globalCompositeOperation = 'multiply';
+        x.fillStyle = tint;
+        x.fillRect(0, 0, c.width, c.height);
+        x.globalCompositeOperation = 'destination-in';
+        x.drawImage(img, 0, 0);
+        c.className = 'tinted';
+        img.replaceWith(c);
+      } catch { /* leave untinted */ }
+    }, { once: true });
+  }
+  img.src = src;
   return img;
 }
 
@@ -186,7 +232,7 @@ function renderPlayer(modal, d) {
       det.append(el('div', { class: 'toplist' },
         ...list.map((it) => el('div', { class: 'item' },
           el('span', { class: 'count', text: fmt(it.count) }),
-          iconImg(`${dir}${it.id}.png`, '', it.id.charAt(0).toUpperCase(), 'ph small'),
+          itemIcon(dir, it.id),
           el('span', { class: 'nm', title: it.id, text: pretty(it.id) })))));
     });
     return det;

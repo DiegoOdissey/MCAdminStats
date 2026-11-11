@@ -238,6 +238,128 @@ app.get('/api/skin/:type/:uuid', async (req, res) => {
   res.type('png').sendFile(file);
 });
 
+/* ------------------------------------------------------------------ icons */
+// Item/mob icons are resolved from the open minecraft-assets repo on GitHub
+// (textures + models), cached forever in ./cache/icons, and served from here.
+// A local file in public/assets/items|mobs/<id>.png always wins if present.
+const ICON_REF = process.env.ICON_REF || config.iconVersion || '1.21.11';
+const ICON_RAW = `https://raw.githubusercontent.com/InventivetalentDev/minecraft-assets/${ICON_REF}/assets/minecraft/`;
+const ICON_CACHE_DIR = path.join(__dirname, 'cache', 'icons');
+fs.mkdirSync(ICON_CACHE_DIR, { recursive: true });
+
+const ID_RE = /^[a-z0-9_]+$/;
+const jsonCache = new Map();
+const inflight = new Map();
+const iconMiss = new Map(); // id -> retry-after timestamp (negative cache)
+
+async function fetchRaw(rel) {
+  try {
+    const r = await fetch(ICON_RAW + rel, { signal: AbortSignal.timeout(8000) });
+    return r.ok ? r : null;
+  } catch { return null; }
+}
+async function getJSON(rel) {
+  if (jsonCache.has(rel)) return jsonCache.get(rel);
+  const r = await fetchRaw(rel);
+  let j = null;
+  if (r) { try { j = await r.json(); } catch { j = null; } }
+  jsonCache.set(rel, j);
+  return j;
+}
+const stripNs = (s) => String(s).replace(/^minecraft:/, '');
+
+// Finds the first "model": "<id>" string inside an items/<id>.json definition.
+function findModelRef(node) {
+  if (!node || typeof node !== 'object') return null;
+  if (typeof node.model === 'string') return node.model;
+  for (const v of Object.values(node)) {
+    const found = findModelRef(v);
+    if (found) return found;
+  }
+  return null;
+}
+
+// Walks a model's parent chain and merges its texture map (child overrides parent).
+async function modelTextures(modelPath, depth = 0) {
+  if (depth > 6) return {};
+  const m = await getJSON(`models/${stripNs(modelPath)}.json`);
+  if (!m) return {};
+  const parent = m.parent && !/^(minecraft:)?builtin\//.test(m.parent) ? await modelTextures(m.parent, depth + 1) : {};
+  return { ...parent, ...(m.textures || {}) };
+}
+
+const TEX_PRIORITY = ['layer0', 'all', 'texture', 'side', 'front', 'north', 'top', 'up', 'end', 'cross', 'torch', 'plant', 'pattern'];
+const PREFER_KEY = { grass_block: 'top', podzol: 'top', mycelium: 'top', crafting_table: 'front', furnace: 'front', smoker: 'front', barrel: 'side' };
+
+function pickTexture(id, tex) {
+  const resolve = (v, n = 0) => (typeof v === 'string' && v.startsWith('#') && n < 6 ? resolve(tex[v.slice(1)], n + 1) : v);
+  const keys = [PREFER_KEY[id], ...TEX_PRIORITY, ...Object.keys(tex).filter((k) => k !== 'particle'), 'particle'].filter(Boolean);
+  for (const k of keys) {
+    const v = resolve(tex[k]);
+    if (typeof v === 'string' && !v.startsWith('#')) return stripNs(v);
+  }
+  return null;
+}
+
+async function remoteTexture(rel) {
+  const r = await fetchRaw(`textures/${rel}.png`);
+  return r ? Buffer.from(await r.arrayBuffer()) : null;
+}
+
+// Stat ids that are blocks/entities without an item of their own -> nearest item.
+const ICON_ALIAS = {
+  sweet_berry_bush: 'sweet_berries', wall_torch: 'torch', soul_wall_torch: 'soul_torch', cave_vines: 'glow_berries',
+  cave_vines_plant: 'glow_berries', kelp_plant: 'kelp', redstone_wall_torch: 'redstone_torch', tripwire: 'string',
+  redstone_wire: 'redstone', water_cauldron: 'cauldron', lava_cauldron: 'cauldron', potatoes: 'potato', carrots: 'carrot',
+  beetroots: 'beetroot', fire: 'flint_and_steel', soul_fire: 'flint_and_steel',
+};
+
+async function resolveIcon(kind, id) {
+  if (kind === 'mob') return remoteTexture(`item/${id}_spawn_egg`);
+  id = ICON_ALIAS[id] || id;
+
+  const modelIds = [];
+  const def = await getJSON(`items/${id}.json`);
+  const ref = findModelRef(def);
+  if (ref) modelIds.push(ref);
+  modelIds.push(`item/${id}`, `block/${id}`, `block/${id}_inventory`);
+
+  for (const mid of [...new Set(modelIds)]) {
+    const tex = pickTexture(id, await modelTextures(mid));
+    if (!tex) continue;
+    const png = await remoteTexture(tex);
+    if (png) return png;
+  }
+  return remoteTexture(`item/${id}`) || null;
+}
+
+app.get('/api/icon/:kind/:id', async (req, res) => {
+  const { kind, id } = req.params;
+  if ((kind !== 'item' && kind !== 'mob') || !ID_RE.test(id)) return res.status(400).end();
+
+  // 1) user-supplied local override
+  const local = path.join(__dirname, 'public', 'assets', kind === 'mob' ? 'mobs' : 'items', `${id}.png`);
+  if (fs.existsSync(local)) return res.set('Cache-Control', 'public, max-age=3600').type('png').sendFile(local);
+
+  // 2) disk cache
+  const file = path.join(ICON_CACHE_DIR, `${kind}_${id}.png`);
+  if (fs.existsSync(file)) return res.set('Cache-Control', 'public, max-age=86400').type('png').sendFile(file);
+
+  // 3) resolve from the asset repo (deduplicated, with short negative cache)
+  const key = `${kind}:${id}`;
+  if ((iconMiss.get(key) || 0) > Date.now()) return res.status(404).end();
+  if (!inflight.has(key)) {
+    inflight.set(key, resolveIcon(kind, id).catch(() => null).finally(() => inflight.delete(key)));
+  }
+  const png = await inflight.get(key);
+  if (!png) {
+    iconMiss.set(key, Date.now() + 30 * 60 * 1000);
+    return res.status(404).end();
+  }
+  try { await fsp.writeFile(file, png); } catch { /* cache dir not writable: still serve it */ }
+  res.set('Cache-Control', 'public, max-age=86400').type('png').send(png);
+});
+
 app.get('/api/config', (req, res) => {
   const world = resolveWorld(config.serverRoot);
   res.json({
@@ -256,7 +378,8 @@ app.post('/api/config', (req, res) => {
   const world = resolveWorld(resolved);
   if (!world.ok) return res.status(400).json({ error: world.error });
   config.serverRoot = resolved;
-  saveConfig(config);
+  try { saveConfig(config); }
+  catch (e) { return res.status(500).json({ error: 'Cannot write config.json: ' + e.message }); }
   res.json({ ok: true, serverRoot: resolved, world: { level: world.level, statsDir: world.statsDir, dataDir: world.dataDir } });
 });
 
