@@ -15,7 +15,7 @@ const STATS_FILE_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]
 
 /* ------------------------------------------------------------------ config */
 function loadConfig() {
-  const defaults = { serverRoot: '', port: 82 };
+  const defaults = { serverRoot: '', port: 8080 };
   try {
     return { ...defaults, ...JSON.parse(fs.readFileSync(CONFIG_PATH, 'utf8')) };
   } catch {
@@ -412,7 +412,7 @@ app.get('/api/players/:uuid', async (req, res) => {
 
 app.use(express.static(path.join(__dirname, 'public')));
 
-const PORT = Number(process.env.PORT) || config.port || 82;
+const PORT = Number(process.env.PORT) || config.port || 8080;
 const HOST = process.env.HOST || '0.0.0.0';
 const server = app.listen(PORT, HOST, () => {
   console.log(`Minecraft Admin Stats running on http://${HOST}:${PORT}`);

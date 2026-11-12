@@ -1,8 +1,8 @@
 :root {
-  --bg: #1f1f1f;
-  --panel: #272727;
+  --bg: #0f0f0f;
+  --panel: #1d1c1c;
   --panel-2: #303030;
-  --line: #3b3b3b;
+  --line: #384261;
   --text: #f1f2f6;
   --muted: #9d9d9d;
   --accent: #0061b5;
@@ -17,7 +17,7 @@ html, body { margin: 0; }
 body {
   background: var(--bg);
   color: var(--text);
-  font-family: system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
+  font-family: "Roboto Mono", monospace;
   min-height: 100vh;
   -webkit-font-smoothing: antialiased;
 }
